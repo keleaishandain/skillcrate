@@ -11,7 +11,6 @@ const WINDOW_DAYS: i64 = 90;
 const SHARE_LIMIT: f64 = 0.15;
 const COLD_IMPORT_DAYS: i64 = 30;
 const COLD_GROUP_CALLS: u64 = 10;
-const ISOLATION_DAYS: i64 = 30;
 const DEFAULT_THRESHOLD: f64 = 0.35;
 
 #[derive(Serialize)]
@@ -168,6 +167,8 @@ pub fn analyze(threshold_override: Option<f64>) -> Result<CurationReport, String
             };
             let verdict = if observing {
                 "observing"
+            } else if state.whitelist.contains(&active[i].dir_name) {
+                "keep"
             } else if count == max_count && max_count > 0 {
                 "keep" // 组内份额最高者永不标记
             } else if share < SHARE_LIMIT && count <= 1 {
@@ -270,6 +271,7 @@ pub fn archive(dir_name: &str) -> Result<(), String> {
 
 pub fn isolation_list() -> Result<Vec<IsolationEntry>, String> {
     let state = load_state();
+    let isolation_days = state.settings.quarantine_days.clamp(1, 365);
     let names: std::collections::HashMap<String, String> = scan::scan_skills()
         .unwrap_or_default()
         .into_iter()
@@ -285,8 +287,8 @@ pub fn isolation_list() -> Result<Vec<IsolationEntry>, String> {
             dir_name: dir.clone(),
             name: names.get(dir).cloned().unwrap_or_else(|| dir.clone()),
             isolated_at: rec.isolated_at.clone(),
-            days_left: (ISOLATION_DAYS - elapsed).max(0),
-            expired: elapsed >= ISOLATION_DAYS,
+            days_left: (isolation_days - elapsed).max(0),
+            expired: elapsed >= isolation_days,
             tools: rec.tools.clone(),
         });
     }

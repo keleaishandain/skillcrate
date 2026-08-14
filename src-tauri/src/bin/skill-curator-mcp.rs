@@ -2,7 +2,7 @@
 //! 新行分隔 JSON-RPC 2.0，复用 GUI 同一套 Rust 核心；stdout 只走协议，诊断走 stderr。
 
 use serde_json::{json, Value};
-use skill_curator_lib::{curation, discover, import, paths, projects, scan, sync};
+use skill_curator_lib::{curation, discover, gitops, import, paths, presets, projects, scan, sync};
 use std::io::{self, BufRead, Write};
 
 fn main() {
@@ -186,6 +186,53 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "force": { "type": "boolean", "description": "强制绕过缓存刷新" }
             } }
+        },
+        {
+            "name": "list_presets",
+            "description": "列出所有 Preset 及其有序 Skills 成员和默认目标 Agent",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "save_preset",
+            "description": "创建或更新 Preset 配置；只写配置，不改变 Agent 目录",
+            "inputSchema": { "type": "object", "properties": {
+                "preset": { "type": "object", "properties": {
+                    "id": { "type": "string" }, "name": { "type": "string" },
+                    "description": { "type": "string" }, "icon": { "type": "string" },
+                    "skill_dir_names": { "type": "array", "items": { "type": "string" } },
+                    "tools": { "type": "array", "items": { "type": "string" } },
+                    "updated_at": { "type": "string" }
+                }, "required": ["id", "name", "skill_dir_names", "tools"] }
+            }, "required": ["preset"] }
+        },
+        {
+            "name": "preview_preset",
+            "description": "预览 Preset 对指定 Agent 的写入计划，不改变文件",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "string" },
+                "tools": { "type": "array", "items": { "type": "string" } }
+            }, "required": ["id", "tools"] }
+        },
+        {
+            "name": "apply_preset",
+            "description": "一次性把 Preset 成员分发到明确指定的 Agent，返回成功、跳过、未变化和失败计数",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "string" },
+                "tools": { "type": "array", "items": { "type": "string" } }
+            }, "required": ["id", "tools"] }
+        },
+        {
+            "name": "set_skill_tags",
+            "description": "替换一个中央 Skill 的自定义标签",
+            "inputSchema": { "type": "object", "properties": {
+                "dir_name": { "type": "string" },
+                "tags": { "type": "array", "items": { "type": "string" } }
+            }, "required": ["dir_name", "tags"] }
+        },
+        {
+            "name": "git_status",
+            "description": "读取中央 Skills 仓库的 Git 分支、远程、变更和最近快照状态",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ]);
     json!({ "tools": tools })
@@ -306,6 +353,32 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
             serde_json::to_value(discover::trending(force)?).map_err(|e| e.to_string())
         }
+        "list_presets" => serde_json::to_value(presets::list()).map_err(|e| e.to_string()),
+        "save_preset" => {
+            let value = args.get("preset").cloned().ok_or("缺少参数 preset")?;
+            let preset: paths::PresetRecord = serde_json::from_value(value).map_err(|error| format!("Preset 参数无效：{error}"))?;
+            serde_json::to_value(presets::upsert(preset)?).map_err(|e| e.to_string())
+        }
+        "preview_preset" | "apply_preset" => {
+            let id = req_str(args, "id")?;
+            let tools = args.get("tools").and_then(|value| value.as_array()).ok_or("缺少参数 tools")?
+                .iter().map(|value| value.as_str().map(str::to_string).ok_or("tools 必须是字符串数组"))
+                .collect::<Result<Vec<_>, _>>()?;
+            if name == "preview_preset" {
+                serde_json::to_value(presets::preview(&id, tools)?).map_err(|e| e.to_string())
+            } else {
+                serde_json::to_value(presets::apply(&id, tools)?).map_err(|e| e.to_string())
+            }
+        }
+        "set_skill_tags" => {
+            let dir_name = req_str(args, "dir_name")?;
+            let tags = args.get("tags").and_then(|value| value.as_array()).ok_or("缺少参数 tags")?
+                .iter().map(|value| value.as_str().map(str::trim).map(str::to_string).ok_or("tags 必须是字符串数组"))
+                .collect::<Result<Vec<_>, _>>()?;
+            let tags = skill_curator_lib::update_skill_tags(&dir_name, tags)?;
+            Ok(json!({ "ok": true, "tags": tags }))
+        }
+        "git_status" => serde_json::to_value(gitops::status()).map_err(|e| e.to_string()),
         _ => Err(format!("unknown tool: {name}")),
     }
 }

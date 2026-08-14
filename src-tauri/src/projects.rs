@@ -22,6 +22,9 @@ pub struct ProjectSkill {
     pub description: String,
     pub tool: String,
     pub in_library: bool,
+    pub content_md: String,
+    pub has_diff: bool,
+    pub sync_status: String,
 }
 
 fn project_tool_skills_dir(project: &Path, tool: &str) -> Result<PathBuf, String> {
@@ -144,8 +147,10 @@ fn scan_project_tool(project: &Path, tool: &str) -> Result<Vec<ProjectSkill>, St
         }
         let mut name = dir_name.clone();
         let mut description = String::new();
+        let mut content_md = String::new();
         let md_path = path.join("SKILL.md");
-        if let Ok(text) = fs::read_to_string(md_path) {
+        if let Ok(text) = fs::read_to_string(&md_path) {
+            content_md = text.clone();
             let frontmatter = scan::parse_frontmatter(&text);
             if let Some(value) = frontmatter.get("name").filter(|v| !v.is_empty()) {
                 name = value.clone();
@@ -154,12 +159,43 @@ fn scan_project_tool(project: &Path, tool: &str) -> Result<Vec<ProjectSkill>, St
                 description = value.clone();
             }
         }
+        let library_path = skills_dir().join(&dir_name).join("SKILL.md");
+        let in_library = library_path.is_file();
+        let has_diff = in_library
+            && fs::read_to_string(&library_path)
+                .map(|library_content| library_content != content_md)
+                .unwrap_or(false);
+        let sync_status = if !in_library {
+            "project_only"
+        } else if !has_diff {
+            "in_sync"
+        } else {
+            let project_modified = fs::metadata(&md_path).and_then(|meta| meta.modified()).ok();
+            let center_modified = fs::metadata(&library_path).and_then(|meta| meta.modified()).ok();
+            match (project_modified, center_modified) {
+                (Some(project_time), Some(center_time)) => {
+                    let tolerance = std::time::Duration::from_secs(1);
+                    if project_time.duration_since(center_time).map(|delta| delta > tolerance).unwrap_or(false) {
+                        "project_newer"
+                    } else if center_time.duration_since(project_time).map(|delta| delta > tolerance).unwrap_or(false) {
+                        "center_newer"
+                    } else {
+                        "diverged"
+                    }
+                }
+                _ => "diverged",
+            }
+        }
+        .to_string();
         skills.push(ProjectSkill {
             dir_name: dir_name.clone(),
             name,
             description,
             tool: tool.to_string(),
-            in_library: skills_dir().join(dir_name).is_dir(),
+            in_library,
+            content_md,
+            has_diff,
+            sync_status,
         });
     }
     skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -266,4 +302,40 @@ pub fn adopt_project_skill(project: &str, dir_name: &str, tool: &str) -> Result<
         },
     );
     save_state(&state)
+}
+
+pub fn project_promote_skill(project: &str, dir_name: &str, tool: &str) -> Result<(), String> {
+    let (_, source) = checked_project_skill(project, dir_name, tool)?;
+    let source_file = source.join("SKILL.md");
+    if !source_file.is_file() {
+        return Err(format!("项目技能缺少 SKILL.md：{}", source.display()));
+    }
+    let destination = skills_dir().join(dir_name).join("SKILL.md");
+    if !destination.is_file() {
+        return Err(format!("中央库中不存在技能：{dir_name}"));
+    }
+    let content = fs::read_to_string(&source_file)
+        .map_err(|error| format!("读取项目技能失败：{}：{error}", source_file.display()))?;
+    fs::write(&destination, content)
+        .map_err(|error| format!("写入中央技能失败：{}：{error}", destination.display()))
+}
+
+pub fn project_pull_skill(project: &str, dir_name: &str, tool: &str) -> Result<(), String> {
+    let (_, destination) = checked_project_skill(project, dir_name, tool)?;
+    let source = skills_dir().join(dir_name).join("SKILL.md");
+    if !source.is_file() {
+        return Err(format!("中央库中不存在技能：{dir_name}"));
+    }
+    let destination_file = destination.join("SKILL.md");
+    if !destination_file.is_file() {
+        return Err(format!("项目技能缺少 SKILL.md：{}", destination.display()));
+    }
+    let content = fs::read_to_string(&source)
+        .map_err(|error| format!("读取中央技能失败：{}：{error}", source.display()))?;
+    fs::write(&destination_file, content).map_err(|error| {
+        format!(
+            "写入项目技能失败：{}：{error}",
+            destination_file.display()
+        )
+    })
 }

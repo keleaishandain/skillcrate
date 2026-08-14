@@ -13,12 +13,12 @@ pub struct ImportOutcome {
     pub message: String,
 }
 
-fn is_skill_dir(p: &Path) -> bool {
+pub(crate) fn is_skill_dir(p: &Path) -> bool {
     p.join("SKILL.md").is_file() || p.join("skill.md").is_file()
 }
 
 /// 发现技能目录：根目录本身 / 一级子目录 / 二级子目录（如 repo/skills/xxx）。
-fn discover_skill_dirs(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn discover_skill_dirs(root: &Path) -> Vec<PathBuf> {
     if is_skill_dir(root) {
         return vec![root.to_path_buf()];
     }
@@ -159,13 +159,50 @@ fn run_git(args: &[&str], with_proxy: bool) -> Result<(), String> {
     }
 }
 
-fn repo_name_from_url(url: &str) -> String {
+pub(crate) fn repo_name_from_url(url: &str) -> String {
     url.trim_end_matches('/')
         .rsplit('/')
         .next()
         .unwrap_or("skill")
         .trim_end_matches(".git")
         .to_string()
+}
+
+pub(crate) fn clone_git_to_temp(url: &str, prefix: &str) -> Result<PathBuf, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("请填写 Git 仓库地址".into());
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let tmp = tmp_dir().join(format!("{prefix}-{stamp}"));
+    fs::create_dir_all(tmp_dir()).map_err(|error| error.to_string())?;
+    let tmp_string = tmp.to_string_lossy().to_string();
+    if let Err(direct_error) = run_git(&["clone", "--depth", "1", url, &tmp_string], false) {
+        let lower = direct_error.to_lowercase();
+        let network_error = [
+            "unable to access",
+            "timed out",
+            "could not resolve",
+            "connection",
+            "ssl",
+            "rpc failed",
+            "early eof",
+        ]
+        .iter()
+        .any(|hint| lower.contains(hint));
+        if !network_error {
+            let _ = force_remove_dir_all(&tmp);
+            return Err(format!("git clone 失败：{direct_error}"));
+        }
+        let _ = force_remove_dir_all(&tmp);
+        run_git(&["clone", "--depth", "1", url, &tmp_string], true).map_err(|proxy_error| {
+            format!("git clone 失败（直连：{direct_error}；代理重试：{proxy_error}）")
+        })?;
+    }
+    Ok(tmp)
 }
 
 /// E9：直连失败且像网络错误时，经 127.0.0.1:7897 代理自动重试一次。
@@ -178,27 +215,7 @@ pub fn import_git_as(
     if url.is_empty() {
         return Err("请填写 Git 仓库地址".into());
     }
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = tmp_dir().join(format!("clone-{stamp}"));
-    fs::create_dir_all(tmp_dir()).map_err(|e| e.to_string())?;
-    let tmp_s = tmp.to_string_lossy().to_string();
-    if let Err(e) = run_git(&["clone", "--depth", "1", url, &tmp_s], false) {
-        let lower = e.to_lowercase();
-        let network = ["unable to access", "timed out", "could not resolve", "connection", "ssl", "rpc failed", "early eof"]
-            .iter()
-            .any(|h| lower.contains(h));
-        if network {
-            let _ = force_remove_dir_all(&tmp);
-            run_git(&["clone", "--depth", "1", url, &tmp_s], true)
-                .map_err(|e2| format!("git clone 失败（直连：{e}；代理重试：{e2}）"))?;
-        } else {
-            let _ = force_remove_dir_all(&tmp);
-            return Err(format!("git clone 失败：{e}"));
-        }
-    }
+    let tmp = clone_git_to_temp(url, "clone")?;
     let result = if is_skill_dir(&tmp) {
         // 仓库根目录本身就是一个技能：用仓库名作为技能目录名
         let name = repo_name_from_url(url);

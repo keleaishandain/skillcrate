@@ -1,7 +1,26 @@
 use crate::paths::{home_dir, skills_dir};
+use serde::Serialize;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+#[derive(Serialize)]
+pub struct WorkspaceSkill {
+    pub dir_name: String,
+    pub managed: bool,
+}
+
+#[derive(Serialize)]
+pub struct ToolWorkspaceStatus {
+    pub tool: String,
+    pub label: String,
+    pub path: String,
+    pub exists: bool,
+    pub total_skills: usize,
+    pub managed_skills: usize,
+    pub unmanaged_skills: usize,
+    pub skills: Vec<WorkspaceSkill>,
+}
 
 /// E9：V1 支持的工具及其技能目录。
 pub fn all_tools() -> Vec<&'static str> {
@@ -96,6 +115,57 @@ pub fn enable(dir_name: &str, tool: &str) -> Result<(), String> {
         return Ok(());
     }
     copy_dir_all(&src, &dst).map_err(|e| format!("复制到 {} 失败：{e}", dst.display()))
+}
+
+pub fn workspace_status() -> Vec<ToolWorkspaceStatus> {
+    all_tools()
+        .into_iter()
+        .filter_map(|tool| {
+            let path = tool_skills_dir(tool)?;
+            let mut skills = Vec::new();
+            if let Ok(entries) = fs::read_dir(&path) {
+                for entry in entries.flatten() {
+                    let entry_path = entry.path();
+                    if !entry_path.is_dir() {
+                        continue;
+                    }
+                    let dir_name = entry.file_name().to_string_lossy().to_string();
+                    let has_manifest = entry_path.join("SKILL.md").is_file() || entry_path.join("skill.md").is_file();
+                    if has_manifest {
+                        skills.push(WorkspaceSkill {
+                            managed: skills_dir().join(&dir_name).is_dir(),
+                            dir_name,
+                        });
+                    }
+                }
+            }
+            skills.sort_by(|a, b| a.dir_name.to_lowercase().cmp(&b.dir_name.to_lowercase()));
+            let managed_skills = skills.iter().filter(|skill| skill.managed).count();
+            Some(ToolWorkspaceStatus {
+                tool: tool.to_string(),
+                label: match tool {
+                    "claude_code" => "Claude Code",
+                    "codex" => "Codex",
+                    "opencode" => "OpenCode",
+                    _ => tool,
+                }
+                .to_string(),
+                path: path.display().to_string(),
+                exists: path.is_dir(),
+                total_skills: skills.len(),
+                managed_skills,
+                unmanaged_skills: skills.len().saturating_sub(managed_skills),
+                skills,
+            })
+        })
+        .collect()
+}
+
+pub fn refresh(dir_name: &str, tool: &str) -> Result<(), String> {
+    let tool_dir = tool_skills_dir(tool).ok_or_else(|| format!("未知工具 {tool}"))?;
+    let destination = tool_dir.join(dir_name);
+    force_remove_dir_all(&destination)?;
+    enable(dir_name, tool)
 }
 
 pub fn disable(dir_name: &str, tool: &str) -> Result<(), String> {
